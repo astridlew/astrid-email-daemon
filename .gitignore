@@ -3,8 +3,8 @@ seen_ids.json
 astrid_mail.log
 *.log
 
-# API keys — never commit
-api_keys.env
+# Config with personal details + API keys — NEVER commit
+config.env
 *.env
 
 # Python

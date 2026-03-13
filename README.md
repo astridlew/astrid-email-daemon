@@ -1,8 +1,8 @@
 # 📬 astrid-email-daemon
 
-An AI-powered email auto-responder for Gmail, built around [Himalaya](https://github.com/pimalaya/himalaya) (CLI email client) and [OpenClaw](https://openclaw.ai) (AI agent runtime).
+An AI-powered email auto-responder for Gmail, built with [Himalaya](https://github.com/pimalaya/himalaya) (CLI email client) and Google Gemini (LLM triage).
 
-When an unread email arrives, the daemon reads it, asks an LLM whether a reply is needed and what to say, then sends the reply automatically — complete with signature.
+When an unread email arrives, the daemon reads it, asks Gemini whether a reply is needed and what to say, then sends the reply automatically — complete with your custom signature.
 
 ---
 
@@ -14,7 +14,7 @@ Cron (every 5 min)
             ├─ himalaya: fetch unread emails
             ├─ For each new email:
             │     ├─ himalaya: read full message
-            │     ├─ openclaw agent: decide reply (JSON)
+            │     ├─ Gemini Flash Lite: decide reply (JSON)
             │     ├─ himalaya: send reply (if needed)
             │     └─ himalaya: mark as seen
             └─ Save seen IDs to seen_ids.json
@@ -26,30 +26,23 @@ Cron (every 5 min)
 
 | Tool | Purpose | Install |
 |------|---------|---------|
-| Python 3 | Runtime | Built-in on macOS |
-| [himalaya](https://github.com/pimalaya/himalaya) | Email CLI (IMAP + SMTP) | `curl -sSL https://raw.githubusercontent.com/pimalaya/himalaya/master/install.sh \| bash` |
+| Python 3 | Runtime | Built-in on macOS / `sudo apt install python3` |
+| [himalaya](https://github.com/pimalaya/himalaya) | Email CLI (IMAP + SMTP) | See [himalaya install docs](https://github.com/pimalaya/himalaya) |
 | google-genai | Google Gemini SDK | `pip3 install google-genai` |
 
 ---
 
 ## API Key
 
-This project uses the **Google Gemini API** for LLM inference.
-
 | Detail | Value |
 |--------|-------|
 | Provider | Google Gemini |
-| Model | `gemini-flash-lite-latest` (lightest available — fast + cheap) |
-| Purpose | Email triage: decide if an email needs a reply + generate the reply |
-| Key location | `~/.config/astrid/api_keys.env` → `GEMINI_API_KEY=...` |
-| Committed to git? | ❌ No — file is in `.gitignore` |
+| Model | `gemini-flash-lite-latest` (lightest available — fast, cheap, sufficient for triage) |
+| Purpose | Decide if an email needs a reply; generate the reply text |
+| Key location | `config.env` → `GEMINI_API_KEY=...` |
+| Committed to git? | ❌ No — `config.env` is in `.gitignore` |
 
-To set up your own key:
-1. Go to [aistudio.google.com/apikey](https://aistudio.google.com/apikey) and generate a key
-2. Add it to `~/.config/astrid/api_keys.env`:
-   ```
-   GEMINI_API_KEY=your_key_here
-   ```
+Get a free API key at: [aistudio.google.com/apikey](https://aistudio.google.com/apikey)
 
 ---
 
@@ -57,7 +50,7 @@ To set up your own key:
 
 ### 1. Configure Himalaya
 
-Set up your Gmail account in `~/.config/himalaya/config.toml`:
+Create `~/.config/himalaya/config.toml` for your Gmail account:
 
 ```toml
 [accounts.gmail]
@@ -79,7 +72,7 @@ port = 993
 encryption.type = "tls"
 login = "you@gmail.com"
 auth.type = "password"
-auth.raw = "YOUR_APP_PASSWORD"   # Gmail App Password (not your main password)
+auth.raw = "YOUR_APP_PASSWORD"
 
 [accounts.gmail.message.send]
 backend.type = "smtp"
@@ -91,32 +84,29 @@ backend.auth.type = "password"
 backend.auth.raw = "YOUR_APP_PASSWORD"
 ```
 
-> **Gmail App Password:** Go to [myaccount.google.com/apppasswords](https://myaccount.google.com/apppasswords) and generate one. Required if 2FA is enabled.
+> **Gmail App Password:** Required if 2FA is enabled. Generate one at [myaccount.google.com/apppasswords](https://myaccount.google.com/apppasswords).
 
-### 2. Configure OpenClaw
-
-Make sure OpenClaw is set up with a working model (e.g. `anthropic/claude-haiku-4-5`):
+### 2. Create Your Config
 
 ```bash
-openclaw status
-openclaw models list
+cp config.example.env config.env
 ```
 
-### 3. Customise the Daemon
+Edit `config.env` with your details:
 
-Edit `astrid_mail.py` to set your identity and signature:
+```env
+GEMINI_API_KEY=your_gemini_api_key_here
+HIMALAYA_ACCOUNT=gmail
+SENDER_NAME=Your Name
+SENDER_EMAIL=you@example.com
+SENDER_TAGLINE=Your tagline here
+POLL_INTERVAL=180
+```
 
-```python
-ACCOUNT = "gmail"   # Must match your himalaya account name
+### 3. Install Dependencies
 
-SIGNATURE = """-- 
-— Your Name 💫
-Your tagline
-you@gmail.com"""
-
-SYSTEM_PROMPT = """You are [Your Name] — [describe yourself].
-...
-"""
+```bash
+pip3 install google-genai
 ```
 
 ### 4. Test It
@@ -149,9 +139,11 @@ Add:
 
 ```
 astrid-email-daemon/
-├── astrid_mail.py     # Main daemon script
-├── seen_ids.json      # Auto-generated: tracks processed email IDs
-├── astrid_mail.log    # Auto-generated: full run log
+├── astrid_mail.py        # Main daemon script
+├── config.example.env    # Template — copy to config.env and fill in
+├── config.env            # Your config + API key (gitignored, never committed)
+├── seen_ids.json         # Auto-generated: tracks processed email IDs
+├── astrid_mail.log       # Auto-generated: full run log
 └── README.md
 ```
 
@@ -159,48 +151,34 @@ astrid-email-daemon/
 
 ## LLM Decision Format
 
-The daemon instructs the LLM to return a structured JSON decision:
+The daemon instructs Gemini to return a structured JSON decision:
 
 ```json
 {
   "should_reply": true,
-  "reason": "Direct question from a person, needs a response",
+  "reason": "Direct question from a real person",
   "reply_body": "Hey! Thanks for reaching out..."
 }
 ```
 
-Emails the LLM will typically **skip**:
-- Newsletters and marketing
-- Automated notifications (GitHub, Google alerts, receipts)
-- Spam
-
-Emails it will **reply to**:
-- Direct questions or messages from real people
-- Anything requiring acknowledgement or action
+**Emails skipped:** newsletters, marketing, automated alerts, receipts, spam  
+**Emails replied to:** direct questions, messages from real people needing a response
 
 ---
 
 ## Running as a Persistent Daemon (optional)
 
-Instead of cron, you can run it continuously (polls every 3 minutes internally):
+Instead of cron, run it continuously:
 
 ```bash
 python3 astrid_mail.py
 ```
 
-Or as a background process:
+Or in the background:
 
 ```bash
 nohup python3 astrid_mail.py > astrid_mail.log 2>&1 &
 ```
-
----
-
-## Notes
-
-- The LLM call via `openclaw agent` can take 2–5 minutes depending on system load and model response time. This is normal — email is async anyway.
-- For faster LLM responses, set `ANTHROPIC_API_KEY` in your environment and swap the `ask_claude()` function to use the Anthropic Python SDK directly.
-- Emails are only processed once (tracked in `seen_ids.json`). Deleting this file will reprocess all current unread emails.
 
 ---
 

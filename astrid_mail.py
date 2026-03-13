@@ -1,15 +1,12 @@
 #!/usr/bin/env python3
 """
 Astrid Email Daemon
-Polls Gmail for unread emails, uses Gemini (Flash Lite) to decide whether to reply,
-then sends the reply via Himalaya.
+Polls a Gmail inbox for unread emails, uses Google Gemini to decide
+whether a reply is needed, then sends the reply via Himalaya CLI.
 
-API Key used:
-  - Provider: Google Gemini
-  - Model: gemini-2.0-flash-lite (lightweight, fast, cheap)
-  - Purpose: Email triage — decide if an email needs a reply and generate one
-  - Key stored at: ~/.config/astrid/api_keys.env (GEMINI_API_KEY)
-  - NOT committed to git (see .gitignore)
+Configuration: config.env (copy from config.example.env, never commit it)
+API key:       GEMINI_API_KEY in config.env
+Model:         gemini-flash-lite-latest — lightweight, fast, cheap; plenty for email triage
 """
 
 import subprocess
@@ -19,59 +16,50 @@ import sys
 import time
 from datetime import datetime
 from pathlib import Path
-from dotenv import load_dotenv  # optional, falls back to manual parse
 
 # ── Config ────────────────────────────────────────────────────────────────────
 
-ACCOUNT = "gmail"
-LOG_FILE = Path(__file__).parent / "astrid_mail.log"
-STATE_FILE = Path(__file__).parent / "seen_ids.json"
-API_KEYS_FILE = Path.home() / ".config" / "astrid" / "api_keys.env"
+CONFIG_FILE = Path(__file__).parent / "config.env"
+LOG_FILE    = Path(__file__).parent / "astrid_mail.log"
+STATE_FILE  = Path(__file__).parent / "seen_ids.json"
 
-# Gemini model — flash-lite is fast and cheap, plenty for email triage
-GEMINI_MODEL = "gemini-flash-lite-latest"  # Lightest available model — good enough for email triage
+GEMINI_MODEL = "gemini-flash-lite-latest"
 
-SIGNATURE = """-- 
-— Astrid Lew 💫
-Digital wanderer & builder
-astrid.lew.sg@gmail.com"""
+SYSTEM_PROMPT_TEMPLATE = """You are {name} — an AI assistant managing emails.
+Your tone is warm but direct, never overly formal. No corporate speak.
 
-SYSTEM_PROMPT = """You are Astrid Lew — a sharp, curious digital assistant based in Singapore.
-You manage emails on behalf of yourself. Your tone is warm but direct, never overly formal.
-No corporate speak. Be genuine and concise.
-
-When given an email, you must decide:
-1. Does this email need a reply? (skip newsletters, spam, automated notifications, receipts, alerts)
+When given an email, decide:
+1. Does it need a reply? (skip newsletters, spam, auto-notifications, receipts, alerts)
 2. If yes, what should the reply say?
 
 Respond ONLY with a valid JSON object:
-{
+{{
   "should_reply": true or false,
-  "reason": "brief reason why or why not",
-  "reply_body": "the reply text (omit if should_reply is false)"
-}
+  "reason": "brief reason",
+  "reply_body": "reply text (omit if should_reply is false)"
+}}
 
-Do NOT include a signature in reply_body — it will be added automatically.
+Do NOT include a signature — it will be added automatically.
 Keep replies natural and human-sounding."""
 
-# ── Helpers ───────────────────────────────────────────────────────────────────
+# ── Load Config ───────────────────────────────────────────────────────────────
 
-def load_api_key():
-    """Load GEMINI_API_KEY from ~/.config/astrid/api_keys.env"""
-    if API_KEYS_FILE.exists():
-        for line in API_KEYS_FILE.read_text().splitlines():
-            line = line.strip()
-            if line.startswith("GEMINI_API_KEY="):
-                return line.split("=", 1)[1].strip()
-    # Fallback to environment variable
-    key = os.environ.get("GEMINI_API_KEY", "")
-    if not key:
+def load_config():
+    config = {}
+    if not CONFIG_FILE.exists():
         raise RuntimeError(
-            f"GEMINI_API_KEY not found.\n"
-            f"Add it to {API_KEYS_FILE} as:\n  GEMINI_API_KEY=your_key_here"
+            f"Config file not found: {CONFIG_FILE}\n"
+            f"Copy config.example.env to config.env and fill in your values."
         )
-    return key
+    for line in CONFIG_FILE.read_text().splitlines():
+        line = line.strip()
+        if line and not line.startswith("#") and "=" in line:
+            k, v = line.split("=", 1)
+            config[k.strip()] = v.strip()
+    return config
 
+
+# ── Helpers ───────────────────────────────────────────────────────────────────
 
 def log(msg):
     ts = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
@@ -97,8 +85,10 @@ def run(cmd):
 
 # ── Email Operations ──────────────────────────────────────────────────────────
 
-def get_unread_envelopes():
-    out, err, code = run("himalaya envelope list --account gmail --output json --page-size 20 2>/dev/null")
+def get_unread_envelopes(account):
+    out, err, code = run(
+        f"himalaya envelope list --account {account} --output json --page-size 20 2>/dev/null"
+    )
     if code != 0 or not out:
         return []
     try:
@@ -109,19 +99,18 @@ def get_unread_envelopes():
         return []
 
 
-def get_message(msg_id):
-    out, err, code = run(f"himalaya message read --account gmail {msg_id} 2>/dev/null")
+def get_message(account, msg_id):
+    out, err, code = run(f"himalaya message read --account {account} {msg_id} 2>/dev/null")
     return out if code == 0 else ""
 
 
-def send_reply(msg_id, body):
-    full_body = body.strip() + "\n\n" + SIGNATURE
-    tmpl_out, _, code = run(f"himalaya template reply --account gmail {msg_id} 2>/dev/null")
+def send_reply(account, msg_id, body, signature):
+    full_body = body.strip() + "\n\n" + signature
+    tmpl_out, _, code = run(f"himalaya template reply --account {account} {msg_id} 2>/dev/null")
     if code != 0:
         log(f"Failed to get reply template for {msg_id}")
         return False
 
-    # Parse headers from template, inject body
     lines = tmpl_out.split("\n")
     headers = []
     for line in lines:
@@ -133,7 +122,7 @@ def send_reply(msg_id, body):
 
     message = "\n".join(headers) + "\n\n" + full_body
     proc = subprocess.run(
-        "himalaya template send --account gmail",
+        f"himalaya template send --account {account}",
         shell=True, input=message, capture_output=True, text=True
     )
     if proc.returncode == 0:
@@ -144,26 +133,22 @@ def send_reply(msg_id, body):
         return False
 
 
-def mark_seen(msg_id):
-    run(f"himalaya flag add --account gmail {msg_id} --flag seen 2>/dev/null")
+def mark_seen(account, msg_id):
+    run(f"himalaya flag add --account {account} {msg_id} --flag seen 2>/dev/null")
 
-# ── LLM Decision (Gemini) ─────────────────────────────────────────────────────
+# ── LLM Decision (Gemini Flash Lite) ─────────────────────────────────────────
 
-def ask_gemini(email_content):
+def ask_gemini(api_key, sender_name, email_content):
     """
-    Uses Google Gemini Flash Lite to decide whether the email needs a reply.
-
-    API key: GEMINI_API_KEY in ~/.config/astrid/api_keys.env
-    Model: gemini-2.0-flash-lite (lightweight — fast and cheap for triage tasks)
-    SDK: google-genai (new official SDK, google.generativeai is deprecated)
+    Calls Google Gemini Flash Lite to triage the email.
+    Model: gemini-flash-lite-latest (fast, cheap — suitable for simple decisions)
     """
     from google import genai
 
-    api_key = load_api_key()
     client = genai.Client(api_key=api_key)
-
+    system_prompt = SYSTEM_PROMPT_TEMPLATE.format(name=sender_name)
     prompt = (
-        f"{SYSTEM_PROMPT}\n\n"
+        f"{system_prompt}\n\n"
         f"Here is the email:\n\n{email_content}\n\n"
         f"Respond ONLY with a valid JSON object."
     )
@@ -172,25 +157,30 @@ def ask_gemini(email_content):
     response = client.models.generate_content(model=GEMINI_MODEL, contents=prompt)
     text = response.text.strip()
 
-    # Strip markdown code fences if present
     if "```" in text:
         start = text.find("```")
         end = text.rfind("```")
         text = text[start:end].split("\n", 1)[-1].strip()
 
-    # Extract JSON object
     start = text.find("{")
     end = text.rfind("}") + 1
     if start == -1:
-        raise Exception(f"No JSON found in response: {text[:200]}")
+        raise Exception(f"No JSON in response: {text[:200]}")
     return json.loads(text[start:end])
 
 # ── Main Loop ─────────────────────────────────────────────────────────────────
 
-def process_emails():
+def process_emails(config):
+    account   = config.get("HIMALAYA_ACCOUNT", "gmail")
+    api_key   = config["GEMINI_API_KEY"]
+    name      = config.get("SENDER_NAME", "Assistant")
+    email     = config.get("SENDER_EMAIL", "")
+    tagline   = config.get("SENDER_TAGLINE", "")
+    signature = f"-- \n— {name}\n{tagline}\n{email}".strip()
+
     log("🔍 Checking for unread emails...")
-    seen_ids = load_seen_ids()
-    envelopes = get_unread_envelopes()
+    seen_ids  = load_seen_ids()
+    envelopes = get_unread_envelopes(account)
 
     if not envelopes:
         log("No unread emails.")
@@ -198,9 +188,9 @@ def process_emails():
 
     new_ids = set()
     for env in envelopes:
-        msg_id = str(env.get("id", ""))
+        msg_id  = str(env.get("id", ""))
         subject = env.get("subject", "(no subject)")
-        sender = env.get("from", {}).get("addr", "unknown")
+        sender  = env.get("from", {}).get("addr", "unknown")
 
         if msg_id in seen_ids:
             continue
@@ -208,38 +198,39 @@ def process_emails():
         log(f"📧 New email #{msg_id} from {sender}: {subject}")
         new_ids.add(msg_id)
 
-        content = get_message(msg_id)
+        content = get_message(account, msg_id)
         if not content:
             log(f"  ⚠️  Could not read message body, skipping")
-            mark_seen(msg_id)
+            mark_seen(account, msg_id)
             continue
 
-        email_excerpt = content[:3000]  # Truncate to save tokens
-
         try:
-            decision = ask_gemini(email_excerpt)
+            decision = ask_gemini(api_key, name, content[:3000])
             log(f"  🤖 Decision — reply: {decision['should_reply']} | reason: {decision['reason']}")
 
             if decision["should_reply"]:
-                send_reply(msg_id, decision["reply_body"])
+                send_reply(account, msg_id, decision["reply_body"], signature)
             else:
                 log(f"  ⏭️  Skipping reply.")
         except Exception as e:
             log(f"  ❌ Gemini error: {e}")
 
-        mark_seen(msg_id)
+        mark_seen(account, msg_id)
 
     save_seen_ids(seen_ids | new_ids)
 
 
 if __name__ == "__main__":
+    config = load_config()
+    poll_interval = int(config.get("POLL_INTERVAL", 180))
+
     if "--once" in sys.argv:
-        process_emails()
+        process_emails(config)
     else:
-        log("🚀 Astrid Email Daemon started (polling every 3 minutes)")
+        log("🚀 Email Daemon started")
         while True:
             try:
-                process_emails()
+                process_emails(config)
             except Exception as e:
                 log(f"💥 Unexpected error: {e}")
-            time.sleep(180)
+            time.sleep(poll_interval)
