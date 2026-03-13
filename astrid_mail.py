@@ -22,6 +22,7 @@ from pathlib import Path
 CONFIG_FILE = Path(__file__).parent / "config.env"
 LOG_FILE    = Path(__file__).parent / "astrid_mail.log"
 STATE_FILE  = Path(__file__).parent / "seen_ids.json"
+LOCK_FILE   = Path(__file__).parent / "astrid_mail.lock"
 
 GEMINI_MODEL = "gemini-flash-lite-latest"
 
@@ -138,35 +139,58 @@ def mark_seen(account, msg_id):
 
 # ── LLM Decision (Gemini Flash Lite) ─────────────────────────────────────────
 
-def ask_gemini(api_key, sender_name, email_content):
+def ask_gemini_triage(api_key, email_content):
     """
-    Calls Google Gemini Flash Lite to triage the email.
-    Model: gemini-flash-lite-latest (fast, cheap — suitable for simple decisions)
+    Stage 1: Gemini Flash Lite decides whether the email needs a reply.
+    Fast (~1s), cheap. Returns True/False + reason.
     """
     from google import genai
 
-    client = genai.Client(api_key=api_key)
-    system_prompt = SYSTEM_PROMPT_TEMPLATE.format(name=sender_name)
-    prompt = (
-        f"{system_prompt}\n\n"
-        f"Here is the email:\n\n{email_content}\n\n"
-        f"Respond ONLY with a valid JSON object."
+    triage_prompt = (
+        "You are an email triage assistant. Given an email, decide if it needs a human reply.\n"
+        "Skip: newsletters, marketing, automated notifications, receipts, alerts, spam.\n"
+        "Reply needed: direct questions or messages from real people.\n\n"
+        "Respond ONLY with valid JSON: "
+        "{\"should_reply\": true/false, \"reason\": \"brief reason\"}\n\n"
+        f"Email:\n\n{email_content}"
     )
 
-    log(f"  🤖 Asking Gemini ({GEMINI_MODEL})...")
-    response = client.models.generate_content(model=GEMINI_MODEL, contents=prompt)
+    client = genai.Client(api_key=api_key)
+    log(f"  ⚡ Gemini triage ({GEMINI_MODEL})...")
+    response = client.models.generate_content(model=GEMINI_MODEL, contents=triage_prompt)
     text = response.text.strip()
 
     if "```" in text:
-        start = text.find("```")
-        end = text.rfind("```")
-        text = text[start:end].split("\n", 1)[-1].strip()
-
-    start = text.find("{")
-    end = text.rfind("}") + 1
+        text = text.split("```")[1].split("\n", 1)[-1].strip()
+    start, end = text.find("{"), text.rfind("}") + 1
     if start == -1:
-        raise Exception(f"No JSON in response: {text[:200]}")
+        raise Exception(f"No JSON in triage response: {text[:200]}")
     return json.loads(text[start:end])
+
+
+def ask_openclaw_reply(sender_name, email_content):
+    """
+    Stage 2: OpenClaw agent (Claude) generates the actual reply.
+    Slower (2-5 min) but uses full Astrid context — memory, personality, projects.
+    Only called when Gemini decides a reply is needed.
+    """
+    prompt = (
+        f"You have received an email. Write a reply as yourself ({sender_name}).\n"
+        f"Be warm but direct. No corporate speak. Sound like yourself.\n"
+        f"Do NOT include a greeting like 'Dear...' or a signature — those are added separately.\n"
+        f"Just write the body of the reply.\n\n"
+        f"Email received:\n\n{email_content}\n\n"
+        f"Reply body:"
+    )
+    log(f"  🤖 OpenClaw agent generating reply (may take 2-5 min)...")
+    proc = subprocess.run(
+        ["openclaw", "agent", "--message", prompt],
+        capture_output=True, text=True, timeout=600
+    )
+    text = (proc.stdout or "").strip()
+    if proc.returncode != 0 or not text:
+        raise Exception(f"openclaw agent failed: {proc.stderr[:200]}")
+    return text
 
 # ── Main Loop ─────────────────────────────────────────────────────────────────
 
@@ -205,19 +229,46 @@ def process_emails(config):
             continue
 
         try:
-            decision = ask_gemini(api_key, name, content[:3000])
-            log(f"  🤖 Decision — reply: {decision['should_reply']} | reason: {decision['reason']}")
+            # Stage 1: fast triage via Gemini (~1s)
+            triage = ask_gemini_triage(api_key, content[:3000])
+            log(f"  ⚡ Triage — reply: {triage['should_reply']} | reason: {triage['reason']}")
 
-            if decision["should_reply"]:
-                send_reply(account, msg_id, decision["reply_body"], signature)
+            if triage["should_reply"]:
+                # Stage 2: full reply via OpenClaw/Claude (2-5 min, but lock prevents clashes)
+                reply_body = ask_openclaw_reply(name, content[:3000])
+                send_reply(account, msg_id, reply_body, signature)
             else:
                 log(f"  ⏭️  Skipping reply.")
         except Exception as e:
-            log(f"  ❌ Gemini error: {e}")
+            log(f"  ❌ Error: {e}")
 
         mark_seen(account, msg_id)
 
     save_seen_ids(seen_ids | new_ids)
+
+
+def run_with_lock(config):
+    """
+    Acquire a lock file before running. If another instance is already
+    running (e.g. OpenClaw reply is taking >5 min), exit immediately.
+    This prevents cron overlap and duplicate replies.
+    """
+    if LOCK_FILE.exists():
+        # Check if the PID inside is still alive
+        try:
+            pid = int(LOCK_FILE.read_text().strip())
+            os.kill(pid, 0)  # signal 0 = just check existence
+            log(f"⏸️  Another instance is running (PID {pid}), skipping this run.")
+            sys.exit(0)
+        except (ProcessLookupError, ValueError):
+            log("⚠️  Stale lock file found, removing and continuing.")
+            LOCK_FILE.unlink(missing_ok=True)
+
+    LOCK_FILE.write_text(str(os.getpid()))
+    try:
+        process_emails(config)
+    finally:
+        LOCK_FILE.unlink(missing_ok=True)
 
 
 if __name__ == "__main__":
@@ -225,12 +276,14 @@ if __name__ == "__main__":
     poll_interval = int(config.get("POLL_INTERVAL", 180))
 
     if "--once" in sys.argv:
-        process_emails(config)
+        run_with_lock(config)
     else:
         log("🚀 Email Daemon started")
         while True:
             try:
-                process_emails(config)
+                run_with_lock(config)
+            except SystemExit:
+                pass  # lock was held, just wait and retry
             except Exception as e:
                 log(f"💥 Unexpected error: {e}")
             time.sleep(poll_interval)

@@ -1,5 +1,6 @@
 # Runtime state (auto-generated)
 seen_ids.json
+astrid_mail.lock
 astrid_mail.log
 *.log
 
