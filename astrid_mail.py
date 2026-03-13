@@ -184,7 +184,7 @@ def ask_openclaw_reply(sender_name, email_content):
     )
     log(f"  🤖 OpenClaw agent generating reply (may take 2-5 min)...")
     proc = subprocess.run(
-        ["openclaw", "agent", "--message", prompt],
+        ["openclaw", "agent", "--agent", "main", "--message", prompt],
         capture_output=True, text=True, timeout=600
     )
     text = (proc.stdout or "").strip()
@@ -234,15 +234,16 @@ def process_emails(config):
             log(f"  ⚡ Triage — reply: {triage['should_reply']} | reason: {triage['reason']}")
 
             if triage["should_reply"]:
-                # Stage 2: full reply via OpenClaw/Claude (2-5 min, but lock prevents clashes)
+                # Stage 2: full reply via OpenClaw/Claude (2-5 min, lock prevents cron clashes)
                 reply_body = ask_openclaw_reply(name, content[:3000])
                 send_reply(account, msg_id, reply_body, signature)
             else:
                 log(f"  ⏭️  Skipping reply.")
-        except Exception as e:
-            log(f"  ❌ Error: {e}")
 
-        mark_seen(account, msg_id)
+            # Only mark seen after successful processing
+            mark_seen(account, msg_id)
+        except Exception as e:
+            log(f"  ❌ Error: {e} — email left unread for retry next run")
 
     save_seen_ids(seen_ids | new_ids)
 
