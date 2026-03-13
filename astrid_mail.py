@@ -65,9 +65,7 @@ def load_config():
 def log(msg):
     ts = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
     line = f"[{ts}] {msg}"
-    print(line)
-    with open(LOG_FILE, "a") as f:
-        f.write(line + "\n")
+    print(line)  # cron redirects stdout → log file
 
 
 def load_seen_ids():
@@ -183,11 +181,31 @@ def ask_openclaw_reply(sender_name, email_content):
         f"Reply body:"
     )
     log(f"  🤖 OpenClaw agent generating reply (may take 2-5 min)...")
+
+    # Ensure NVM-managed openclaw is on PATH even when called from cron/subprocess
+    env = os.environ.copy()
+    nvm_bin = os.path.expanduser("~/.nvm/versions/node/v24.14.0/bin")
+    if nvm_bin not in env.get("PATH", ""):
+        env["PATH"] = nvm_bin + ":" + env.get("PATH", "")
+
     proc = subprocess.run(
         ["openclaw", "agent", "--agent", "main", "--message", prompt],
-        capture_output=True, text=True, timeout=600
+        capture_output=True, text=True, timeout=600, env=env
     )
     text = (proc.stdout or "").strip()
+
+    # Detect known error patterns that openclaw may write to stdout with exit code 0
+    error_patterns = [
+        "LLM request rejected",
+        "Output blocked by content filtering",
+        "Gateway agent failed",
+        "openclaw agent failed",
+        "Error:",
+    ]
+    for pat in error_patterns:
+        if pat in text:
+            raise Exception(f"openclaw agent output contained error marker ({pat!r}): {text[:300]}")
+
     if proc.returncode != 0 or not text:
         raise Exception(f"openclaw agent failed: {proc.stderr[:200]}")
     return text
