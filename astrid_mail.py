@@ -25,6 +25,7 @@ STATE_FILE  = Path(__file__).parent / "seen_ids.json"
 LOCK_FILE   = Path(__file__).parent / "astrid_mail.lock"
 
 GEMINI_MODEL = "gemini-flash-lite-latest"
+HIMALAYA_BIN = "/usr/local/bin/himalaya"
 
 SYSTEM_PROMPT_TEMPLATE = """You are {name} — an AI assistant managing emails.
 Your tone is warm but direct, never overly formal. No corporate speak.
@@ -86,7 +87,7 @@ def run(cmd):
 
 def get_unread_envelopes(account):
     out, err, code = run(
-        f"himalaya envelope list --account {account} --output json --page-size 20 2>/dev/null"
+        f"{HIMALAYA_BIN} envelope list --account {account} --output json --page-size 20 2>/dev/null"
     )
     if code != 0 or not out:
         return []
@@ -99,13 +100,13 @@ def get_unread_envelopes(account):
 
 
 def get_message(account, msg_id):
-    out, err, code = run(f"himalaya message read --account {account} {msg_id} 2>/dev/null")
+    out, err, code = run(f"{HIMALAYA_BIN} message read --account {account} {msg_id} 2>/dev/null")
     return out if code == 0 else ""
 
 
 def send_reply(account, msg_id, body, signature):
     full_body = body.strip() + "\n\n" + signature
-    tmpl_out, _, code = run(f"himalaya template reply --account {account} {msg_id} 2>/dev/null")
+    tmpl_out, _, code = run(f"{HIMALAYA_BIN} template reply --account {account} {msg_id} 2>/dev/null")
     if code != 0:
         log(f"Failed to get reply template for {msg_id}")
         return False
@@ -121,7 +122,7 @@ def send_reply(account, msg_id, body, signature):
 
     message = "\n".join(headers) + "\n\n" + full_body
     proc = subprocess.run(
-        f"himalaya template send --account {account}",
+        f"{HIMALAYA_BIN} template send --account {account}",
         shell=True, input=message, capture_output=True, text=True
     )
     if proc.returncode == 0:
@@ -133,7 +134,7 @@ def send_reply(account, msg_id, body, signature):
 
 
 def mark_seen(account, msg_id):
-    run(f"himalaya flag add --account {account} {msg_id} --flag seen 2>/dev/null")
+    run(f"{HIMALAYA_BIN} flag add --account {account} {msg_id} --flag seen 2>/dev/null")
 
 # ── LLM Decision (Gemini Flash Lite) ─────────────────────────────────────────
 
