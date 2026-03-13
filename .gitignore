@@ -3,6 +3,10 @@ seen_ids.json
 astrid_mail.log
 *.log
 
+# API keys — never commit
+api_keys.env
+*.env
+
 # Python
 __pycache__/
 *.pyc

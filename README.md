@@ -28,7 +28,28 @@ Cron (every 5 min)
 |------|---------|---------|
 | Python 3 | Runtime | Built-in on macOS |
 | [himalaya](https://github.com/pimalaya/himalaya) | Email CLI (IMAP + SMTP) | `curl -sSL https://raw.githubusercontent.com/pimalaya/himalaya/master/install.sh \| bash` |
-| [openclaw](https://openclaw.ai) | AI agent runner | `npm install -g openclaw` |
+| google-genai | Google Gemini SDK | `pip3 install google-genai` |
+
+---
+
+## API Key
+
+This project uses the **Google Gemini API** for LLM inference.
+
+| Detail | Value |
+|--------|-------|
+| Provider | Google Gemini |
+| Model | `gemini-flash-lite-latest` (lightest available — fast + cheap) |
+| Purpose | Email triage: decide if an email needs a reply + generate the reply |
+| Key location | `~/.config/astrid/api_keys.env` → `GEMINI_API_KEY=...` |
+| Committed to git? | ❌ No — file is in `.gitignore` |
+
+To set up your own key:
+1. Go to [aistudio.google.com/apikey](https://aistudio.google.com/apikey) and generate a key
+2. Add it to `~/.config/astrid/api_keys.env`:
+   ```
+   GEMINI_API_KEY=your_key_here
+   ```
 
 ---
 
