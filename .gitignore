@@ -1,0 +1,13 @@
+# Runtime state (auto-generated)
+seen_ids.json
+astrid_mail.log
+*.log
+
+# Python
+__pycache__/
+*.pyc
+*.pyo
+.env
+
+# macOS
+.DS_Store
